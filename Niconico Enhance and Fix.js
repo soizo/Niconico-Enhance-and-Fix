@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niconico Enhance and Fix
 // @namespace    https://www.nicovideo.jp/
-// @version      0.5.5
+// @version      0.5.7
 // @description  Skip or accelerate Niconico watch-page video ads and click skip UI in ad iframes.
 // @author       Codex, Grok, SoizoKtantas
 // @match        https://www.nicovideo.jp/watch/*
@@ -31,6 +31,7 @@
   const COMMENT_SYNC_DRIFT = 0.4;
   const COMMENT_SEEK_BACK_THRESHOLD = 0.1;
   const COMMENT_SEEK_FORWARD_THRESHOLD = 0.8;
+  const COMMENT_FORCE_SEEK_WINDOW = 1600;
   const PLAYER_CONTROL_SELECTOR = '.f187xx8z';
   const PLAYER_CONTROL_ACTIVE_CLASS = 'controlling';
   const PLAYER_SWAP_INTERVAL = 1200;
@@ -127,7 +128,16 @@
   }
 
   function runCommentOverlay() {
-    const state = { overlay: null, iframe: null, container: null, video: null, src: '', lastTime: null };
+    const state = {
+      overlay: null,
+      iframe: null,
+      container: null,
+      video: null,
+      src: '',
+      lastTime: null,
+      forceSeekUntil: 0,
+      forceSeekDirection: null,
+    };
 
     const sendSync = () => {
       const iframe = state.iframe;
@@ -136,6 +146,7 @@
       const video = findMainVideo();
       if (!video) return;
 
+      const now = Date.now();
       const active = isContentReady(video);
       const time = Number.isFinite(video.currentTime) ? video.currentTime : 0;
       const rate = Number.isFinite(video.playbackRate) ? video.playbackRate : 1;
@@ -149,6 +160,17 @@
         const expected = rate * (COMMENT_SYNC_INTERVAL / 1000);
         seekForward = delta > expected + COMMENT_SEEK_FORWARD_THRESHOLD;
       }
+      if (seeking && (seekBack || seekForward)) {
+        state.forceSeekDirection = seekBack ? 'back' : 'forward';
+        state.forceSeekUntil = now + COMMENT_FORCE_SEEK_WINDOW;
+      }
+      const forceBack = state.forceSeekDirection === 'back' && now < state.forceSeekUntil;
+      const forceForward = state.forceSeekDirection === 'forward' && now < state.forceSeekUntil;
+      if (!forceBack && !forceForward && state.forceSeekDirection) {
+        state.forceSeekDirection = null;
+      }
+      seekBack = seekBack || forceBack;
+      seekForward = seekForward || forceForward;
       if (Number.isFinite(time)) {
         state.lastTime = time;
       } else {
@@ -714,8 +736,14 @@
           } else {
             video.currentTime = Math.max(targetTime, 0);
           }
+          try {
+            video.dispatchEvent(new Event('timeupdate'));
+            video.dispatchEvent(new Event('seeked'));
+          } catch (err) {
+            // Ignore synthetic event failures.
+          }
           const updatedTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
-          if (Math.abs(updatedTime - targetTime) > COMMENT_SYNC_DRIFT || video.seeking) {
+          if (Math.abs(updatedTime - targetTime) > COMMENT_SYNC_DRIFT) {
             needsRetry = true;
           }
         } catch (err) {
