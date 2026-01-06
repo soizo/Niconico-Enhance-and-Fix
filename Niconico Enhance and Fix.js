@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Niconico Enhance and Fix
 // @namespace    https://www.nicovideo.jp/
-// @version      0.5.3
+// @version      0.5.5
 // @description  Skip or accelerate Niconico watch-page video ads and click skip UI in ad iframes.
 // @author       Codex, Grok, SoizoKtantas
 // @match        https://www.nicovideo.jp/watch/*
@@ -27,8 +27,13 @@
     'persistence=1&oldScript=1&referer=&from=0&allowProgrammaticFullScreen=1';
   const EMBED_ORIGIN = `https://${EMBED_HOST}`;
   const COMMENT_SYNC_TYPE = 'nico-comment-sync';
-  const COMMENT_SYNC_INTERVAL = 250;
+  const COMMENT_SYNC_INTERVAL = 1024;
   const COMMENT_SYNC_DRIFT = 0.4;
+  const COMMENT_SEEK_BACK_THRESHOLD = 0.1;
+  const COMMENT_SEEK_FORWARD_THRESHOLD = 0.8;
+  const PLAYER_CONTROL_SELECTOR = '.f187xx8z';
+  const PLAYER_CONTROL_ACTIVE_CLASS = 'controlling';
+  const PLAYER_SWAP_INTERVAL = 1200;
   const EMBED_PARENT_ORIGINS = ['https://www.nicovideo.jp', 'https://nicovideo.jp'];
   const EMBED_PLAY_TITLE_JP = '\u518d\u751f';
   const EMBED_PLAY_TITLE_JP_ALT = '\u958b\u59cb';
@@ -36,6 +41,7 @@
   const AD_PLAYBACK_RATE = 2048;
   const OVERLAY_ALPHA = 0.45;
   const OVERLAY_CLASS = 'ad-dim-overlay-canvas';
+  const DEBUG_LOGS = true;
   const SKIP_SELECTORS = [
     '#request_skip',
     '.videoAdUiSkipButton',
@@ -52,6 +58,8 @@
   } else {
     runWatchSkipper();
     runCommentOverlay();
+    runPlayerChromeLock();
+    runPlayerSwap();
   }
 
   // Ad UI lives in a cross-origin iframe; handle skip inside the ad frame itself.
@@ -119,7 +127,7 @@
   }
 
   function runCommentOverlay() {
-    const state = { overlay: null, iframe: null, container: null, video: null, src: '' };
+    const state = { overlay: null, iframe: null, container: null, video: null, src: '', lastTime: null };
 
     const sendSync = () => {
       const iframe = state.iframe;
@@ -131,7 +139,21 @@
       const active = isContentReady(video);
       const time = Number.isFinite(video.currentTime) ? video.currentTime : 0;
       const rate = Number.isFinite(video.playbackRate) ? video.playbackRate : 1;
-      const paused = !active || video.paused || video.ended;
+      const seeking = Boolean(video.seeking);
+      const paused = !active || video.paused || video.ended || seeking;
+      let seekBack = false;
+      let seekForward = false;
+      if (Number.isFinite(time) && Number.isFinite(state.lastTime)) {
+        const delta = time - state.lastTime;
+        seekBack = delta < -COMMENT_SEEK_BACK_THRESHOLD;
+        const expected = rate * (COMMENT_SYNC_INTERVAL / 1000);
+        seekForward = delta > expected + COMMENT_SEEK_FORWARD_THRESHOLD;
+      }
+      if (Number.isFinite(time)) {
+        state.lastTime = time;
+      } else {
+        state.lastTime = null;
+      }
 
       iframe.contentWindow.postMessage(
         {
@@ -140,6 +162,9 @@
           rate,
           paused,
           active,
+          seeking,
+          seekBack,
+          seekForward,
         },
         EMBED_ORIGIN
       );
@@ -220,6 +245,146 @@
     });
   }
 
+  function logDebug(message, data) {
+    if (!DEBUG_LOGS) return;
+    if (data !== undefined) {
+      console.log(`[NEF] ${message}`, data);
+    } else {
+      console.log(`[NEF] ${message}`);
+    }
+  }
+
+  function runPlayerChromeLock() {
+    const styleId = 'nef-player-chrome-lock';
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement('style');
+      style.id = styleId;
+      style.textContent = `
+        ${PLAYER_CONTROL_SELECTOR}.${PLAYER_CONTROL_ACTIVE_CLASS} {
+          opacity: 0 !important;
+          pointer-events: none !important;
+        }
+      `;
+      document.documentElement.appendChild(style);
+    }
+
+    const scrub = () => {
+      let removed = 0;
+      const controls = Array.from(document.querySelectorAll(PLAYER_CONTROL_SELECTOR));
+      for (const control of controls) {
+        if (control.classList.contains(PLAYER_CONTROL_ACTIVE_CLASS)) {
+          control.classList.remove(PLAYER_CONTROL_ACTIVE_CLASS);
+          removed += 1;
+        }
+      }
+      if (controls.length > 0 || removed > 0) {
+        logDebug('chrome-lock scrub', { controls: controls.length, removed });
+      }
+    };
+
+    const observer = observeDom(scrub, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+    const intervalId = window.setInterval(scrub, 500);
+
+    window.addEventListener(
+      'pagehide',
+      () => {
+        if (observer) observer.disconnect();
+        clearInterval(intervalId);
+      },
+      { once: true }
+    );
+
+    whenReady(scrub);
+  }
+
+  function runPlayerSwap() {
+    const swap = () => {
+      logDebug('swap tick');
+      const videos = Array.from(document.querySelectorAll('video')).filter((video) => !isAdVideo(video));
+      if (videos.length < 2) {
+        logDebug('swap skip: not enough videos', { count: videos.length });
+        return;
+      }
+
+      const mainVideo = findMainVideo();
+      if (!mainVideo) {
+        logDebug('swap skip: no main video');
+        return;
+      }
+
+      const mainContainer = mainVideo.parentElement;
+      if (!mainContainer) {
+        logDebug('swap skip: no main container');
+        return;
+      }
+
+      let targetContainer = null;
+      for (const video of videos) {
+        if (video === mainVideo) continue;
+        const container = video.parentElement;
+        if (!container) continue;
+        if (!targetContainer) targetContainer = container;
+        if (container.querySelector('button')) {
+          targetContainer = container;
+          break;
+        }
+      }
+
+      if (!targetContainer) {
+        logDebug('swap skip: no target container');
+        return;
+      }
+      if (targetContainer === mainContainer) {
+        logDebug('swap skip: already in target');
+        return;
+      }
+
+      logDebug('swap target picked', {
+        mainVideo: mainVideo.currentSrc || mainVideo.src || '',
+        targetButtons: targetContainer.querySelectorAll('button').length,
+      });
+
+      let removed = 0;
+      const targetVideo = targetContainer.querySelector('video');
+      if (targetVideo && targetVideo !== mainVideo && targetVideo.parentNode) {
+        targetVideo.parentNode.removeChild(targetVideo);
+        removed += 1;
+      }
+
+      for (const video of videos) {
+        if (video === mainVideo || video === targetVideo) continue;
+        if (video.parentNode) {
+          video.parentNode.removeChild(video);
+          removed += 1;
+        }
+      }
+
+      if (!targetContainer.contains(mainContainer)) {
+        targetContainer.insertBefore(mainContainer, targetContainer.firstChild);
+        logDebug('swap moved main container', { removed });
+      }
+    };
+
+    const observer = observeDom(swap, { childList: true, subtree: true });
+    const intervalId = window.setInterval(swap, PLAYER_SWAP_INTERVAL);
+
+    window.addEventListener(
+      'pagehide',
+      () => {
+        if (observer) observer.disconnect();
+        clearInterval(intervalId);
+      },
+      { once: true }
+    );
+
+    whenReady(swap);
+  }
+
   function ensureAdState(video, isAd, stateMap) {
     let state = stateMap.get(video);
     if (!state) {
@@ -285,6 +450,7 @@
     state.container = null;
     state.video = null;
     state.src = '';
+    state.lastTime = null;
   }
 
   function skipAdVideo(video) {
@@ -397,15 +563,19 @@
         padding: 0;
         width: 100%;
         height: 100%;
-        background: transparent;
+        background: transparent !important;
         overflow: hidden;
+      }
+      body, body * {
+        background-color: transparent !important;
+        background-image: none !important;
       }
       #rootElementId, #rootElementId > div {
         width: 100%;
         height: 100%;
-        background: transparent;
+        background: transparent !important;
       }
-      #video, #video video {
+      video, #video, #video video {
         opacity: 0 !important;
         pointer-events: none !important;
       }
@@ -430,7 +600,47 @@
     `;
     document.documentElement.appendChild(style);
 
+    setupEmbedChromeStripper();
     setupEmbedSync();
+  }
+
+  function setupEmbedChromeStripper() {
+    const apply = () => {
+      const comment = document.getElementById('comment');
+      if (!comment) return;
+
+      const parent = comment.parentElement;
+      if (parent && (parent.style.position === '' || parent.style.position === 'static')) {
+        parent.style.position = 'relative';
+      }
+
+      let node = comment;
+      while (node && node.parentElement && node !== document.body) {
+        const container = node.parentElement;
+        const siblings = Array.from(container.children);
+        for (const child of siblings) {
+          if (child === node) continue;
+          child.style.opacity = '0';
+          child.style.pointerEvents = 'none';
+          child.style.background = 'transparent';
+        }
+        node = container;
+      }
+    };
+
+    const observer = observeDom(apply, { childList: true, subtree: true });
+    const intervalId = window.setInterval(apply, 1000);
+
+    window.addEventListener(
+      'pagehide',
+      () => {
+        if (observer) observer.disconnect();
+        clearInterval(intervalId);
+      },
+      { once: true }
+    );
+
+    apply();
   }
 
   function setupEmbedSync() {
@@ -474,6 +684,7 @@
   function applyEmbedSync(data) {
     const video = findEmbedVideo();
     if (!video) return false;
+    let needsRetry = false;
 
     if (video.muted !== true) {
       video.muted = true;
@@ -486,13 +697,30 @@
       video.playbackRate = data.rate;
     }
 
-    if (Number.isFinite(data.time)) {
-      const delta = Math.abs((video.currentTime || 0) - data.time);
-      if (delta > COMMENT_SYNC_DRIFT) {
+    const targetTime = Number.isFinite(data.time) ? data.time : null;
+    const forceSeekBack = data.seekBack === true;
+    const forceSeekForward = data.seekForward === true;
+    if (targetTime !== null) {
+      const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+      const delta = Math.abs(currentTime - targetTime);
+      const shouldSeek = delta > COMMENT_SYNC_DRIFT || forceSeekBack || forceSeekForward;
+      if (shouldSeek) {
         try {
-          video.currentTime = Math.max(data.time, 0);
+          if (forceSeekBack && !video.paused) {
+            video.pause();
+          }
+          if (typeof video.fastSeek === 'function') {
+            video.fastSeek(Math.max(targetTime, 0));
+          } else {
+            video.currentTime = Math.max(targetTime, 0);
+          }
+          const updatedTime = Number.isFinite(video.currentTime) ? video.currentTime : 0;
+          if (Math.abs(updatedTime - targetTime) > COMMENT_SYNC_DRIFT || video.seeking) {
+            needsRetry = true;
+          }
         } catch (err) {
           // Ignore seek errors while buffering.
+          needsRetry = true;
         }
       }
     }
@@ -501,11 +729,11 @@
       if (!video.paused) {
         video.pause();
       }
-      return true;
+      return !needsRetry;
     }
 
     ensureEmbedPlay(video);
-    return true;
+    return !needsRetry;
   }
 
   function findEmbedVideo() {
