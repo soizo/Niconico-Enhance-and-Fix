@@ -5,18 +5,21 @@
 // @name:zh-CN   Niconico 增强与修复
 // @name:zh-TW   Niconico 增强與修復
 // @namespace    https://www.nicovideo.jp/
-// @version      0.6.9
-// @description  當播放頁的播放量/留言數等統計异常（或日區帳號）時自動切换到嵌入播放器；在原版播放器中盡可能跳過廣告，并在嵌入播放器下盡量保持主要控制按鈕可用。
-// @description:en      Auto-switches to the embedded player when watch-page metrics (views/comments) look abnormal (or for Japanese accounts); attempts to skip ads on the original player and keeps key controls accessible while using the embed.
-// @description:ja      再生数/コメント数などの表示が不自然なとき（または日本向けアカウント）に埋め込みプレイヤーへ自動切替。通常プレイヤーでは広告を可能な範囲でスキップし、埋め込み利用時も主要な操作ボタンが使えるようにします。
-// @description:zh-CN   当播放页的播放量/评论数等统计异常（或日区账号）时自动切换到嵌入播放器；在原版播放器中尽可能跳过广告，并在嵌入播放器下尽量保持主要控制按钮可用。
-// @description:zh-TW   當播放頁的播放量/留言數等統計异常（或日區帳號）時自動切换到嵌入播放器；在原版播放器中盡可能跳過廣告，并在嵌入播放器下盡量保持主要控制按鈕可用。
+// @version      0.6.10
+// @description  統計異常或日區帳號自動切換到嵌入播放器；原播放器嘗試跳過/屏蔽廣告；保留嵌入播放器主要控制。
+// @description:en      Auto-switches to the embedded player when watch metrics look abnormal (or for Japanese accounts); skips/blocks ads where possible; keeps key controls usable in the embed.
+// @description:ja      再生数/コメント数などの表示が不自然なとき（または日本向けアカウント）に埋め込みプレイヤーへ自動切替。広告は可能な範囲でスキップ/ブロックし、埋め込み時も主要操作を使えるようにします。
+// @description:zh-CN   统计异常或日区账号自动切换到嵌入播放器；原播放器尽量跳过/屏蔽广告；保留嵌入播放器主要控制按钮可用。
+// @description:zh-TW   統計異常或日區帳號自動切換到嵌入播放器；原播放器嘗試跳過/屏蔽廣告；保留嵌入播放器主要控制。
 // @author       Codex, Grok, SoizoKtantas
+// @license      CC BY 4.0
 // @match        https://www.nicovideo.jp/watch/*
 // @match        https://nicovideo.jp/watch/*
 // @match        https://embed.nicovideo.jp/watch/*
 // @run-at       document-start
 // @grant        none
+// @downloadURL https://update.greasyfork.org/scripts/561611/%E3%83%8B%E3%82%B3%E3%83%8B%E3%82%B3%E5%A2%9E%E5%BC%BA%E8%88%87%E4%BF%AE%E5%BE%A9.user.js
+// @updateURL https://update.greasyfork.org/scripts/561611/%E3%83%8B%E3%82%B3%E3%83%8B%E3%82%B3%E5%A2%9E%E5%BC%BA%E8%88%87%E4%BF%AE%E5%BE%A9.meta.js
 // ==/UserScript==
 
 (function () {
@@ -31,6 +34,7 @@
   const EMBED_WRAPPER_CLASS = 'nef-embed-wrapper';
   const EMBED_IFRAME_CLASS = 'nef-embed-iframe';
   const STYLE_ID = 'nef-embed-style';
+  const HOST_AD_STYLE_ID = 'nef-host-ad-style';
   const UPDATE_INTERVAL = 1000;
   const METRICS_CACHE_MS = 1500;
   const JAPANESE_LOCALE_RE = /(^|[^a-z0-9])(?:ja(?:[-_]|$)|jp|日本|ニホン|にほん)/i;
@@ -62,6 +66,17 @@
   const SETTINGS_LABEL_RE = /(設定|settings?)/i;
   const FULLSCREEN_LABEL_RE = /(全画面|fullscreen)/i;
   const SETTINGS_BUTTON_GAP = 8;
+  const HOST_AD_HIDE_CSS = `
+    #root>div>main>div>div>section>div>div>div>div:has(div[id^="ads"]),
+    #root>div>main>div>div.bottom_x3.z_docked>div,
+    #CommonHeader>div>div>div>div.common-header-wb7b82>div.common-header-m5ds7e>div,
+    #root>div>main>div>div>section>div>div:has(div[id^="ads"]),
+    [id^="ads"],
+    .RightSideAdContainer-banner:has(div.Ads > iframe),
+    .HeaderContainer-ads {
+      display: none !important;
+    }
+  `;
   const EMBED_HIDE_CSS = `
     .f1pw04al,
     .f3ta3nh,
@@ -148,10 +163,18 @@
         width: 100%;
         height: 100%;
         border: 0;
-        display: block;
-        background: #000;
+      display: block;
+      background: #000;
       }
     `;
+    document.documentElement.appendChild(style);
+  };
+
+  const ensureHostAdStyle = () => {
+    if (document.getElementById(HOST_AD_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = HOST_AD_STYLE_ID;
+    style.textContent = HOST_AD_HIDE_CSS;
     document.documentElement.appendChild(style);
   };
 
@@ -1186,6 +1209,7 @@
   }
 
   whenReady(() => {
+    ensureHostAdStyle();
     setupEmbedControlListener();
     setupPlaybackRateSync();
     setupOriginalAdSkip();
