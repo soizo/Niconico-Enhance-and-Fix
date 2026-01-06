@@ -2,6 +2,8 @@
 
 Auto-switches to the embedded player when watch metrics look abnormal (or for Japanese accounts); skips/blocks ads where possible; keeps key controls usable in the embed.
 
+[adblock CSS](https://greasyfork.org/scripts/561612-nicovideo-adblock)
+
 ## Features
 - Auto-switch to embedded player when view/comment metrics appear abnormal.
 - Auto-switch to embedded player for Japanese-locale accounts.

@@ -2,6 +2,8 @@
 
 统计异常或日区账号自动切换到嵌入播放器；原播放器尽量跳过/屏蔽广告；保留嵌入播放器主要控制按钮可用。
 
+[adblock CSS](https://greasyfork.org/scripts/561612-nicovideo-adblock)
+
 ![screenshot](screenshot.png)
 
 ## 功能
